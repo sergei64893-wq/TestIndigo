@@ -1,0 +1,115 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: indigo_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - indigo-network
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.3
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - indigo-network
+      
+  kafka:
+    image: confluentinc/cp-kafka:7.5.3
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - indigo-network
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    depends_on:
+      - kafka
+    networks:
+      - indigo-network
+      
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - indigo-network
+  
+  indigo-api:
+    build:
+      context: .
+      dockerfile: Indigo.Api/Dockerfile
+    container_name: indigo_app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      - ConnectionStrings__DefaultConnection=Host=postgres;Port=5432;Database=indigo_db;Username=postgres;Password=postgres
+      - Kafka__BootstrapServers=kafka:29092
+      - Kafka__GroupId=catalog-consumer
+      - Kafka__Topic=exchange-ticks
+      - Redis__ConnectionString=redis:6379
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_HTTP_PORT=8080
+      - ASPNETCORE_HTTPS_PORT=8081
+    ports:
+      - "5050:8080"
+      - "5051:8081"
+    networks:
+      - indigo-network
+  
+  indigo-processor:
+    build:
+      context: .
+      dockerfile: Indigo.Processor/Dockerfile
+    container_name: indigo_processor
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - ConnectionStrings__DefaultConnection=Host=postgres;Port=5432;Database=indigo_db;Username=postgres;Password=postgres
+      - Kafka__BootstrapServers=kafka:29092
+      - Kafka__GroupId=catalog-consumer
+      - Kafka__Topic=exchange-ticks
+      - ConnectionStrings__DefaultConnection=Host=postgres;Port=5432;Database=indigo_db;Username=postgres;Password=postgres
+      - ASPNETCORE_ENVIRONMENT=Production
+    networks:
+      - indigo-network
+
+volumes:
+  postgres_data:
+
+networks:
+  indigo-network:
+    driver: bridge
+
