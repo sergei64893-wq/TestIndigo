@@ -1,9 +1,12 @@
+using System.Buffers;
 using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Runtime.CompilerServices;
 using System.Text;
 using Indigo.Application.Interfaces;
 using Indigo.Domain.ValueObjects;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.ObjectPool;
 
 namespace Indigo.Application.WebSocket;
 
@@ -14,16 +17,31 @@ public abstract class BaseExchangeWebSocketClient : IExchangeClient
 {
     protected readonly ILogger Logger;
     protected readonly string WebSocketUrl;
-    protected System.Net.WebSockets.ClientWebSocket? WebSocket;
+    protected volatile System.Net.WebSockets.ClientWebSocket? WebSocket;
     private CancellationTokenSource? _cancellationTokenSource;
+    private readonly ArrayPool<byte> _bufferPool = ArrayPool<byte>.Shared;
+    private readonly ObjectPool<MemoryStream> _streamPool;
+    private readonly object _webSocketLock = new object();
+    private readonly ILogger _logger;  // ✅ Для логирования в методах
 
     public abstract string SourceName { get; }
-    public bool IsConnected => WebSocket?.State == WebSocketState.Open;
+    public bool IsConnected
+    {
+        get
+        {
+            lock (_webSocketLock)
+            {
+                return WebSocket?.State == WebSocketState.Open;
+            }
+        }
+    }
 
-    protected BaseExchangeWebSocketClient(ILogger logger, string webSocketUrl)
+    protected BaseExchangeWebSocketClient(ILogger logger, string webSocketUrl, ObjectPool<MemoryStream> streamPool)
     {
         Logger = logger;
+        _logger = logger;
         WebSocketUrl = webSocketUrl;
+        _streamPool = streamPool;
     }
 
     public virtual async Task ConnectAsync(CancellationToken cancellationToken = default)
@@ -31,33 +49,52 @@ public abstract class BaseExchangeWebSocketClient : IExchangeClient
         try
         {
             _cancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            WebSocket = new System.Net.WebSockets.ClientWebSocket();
+            lock (_webSocketLock)
+            {
+                WebSocket = new System.Net.WebSockets.ClientWebSocket();
+            }
             
+            // Настройка буферов сокета (опционально, но полезно для больших сообщений)
+            // WebSocket.Options.SetBuffer(65536, 65536);
+
             await WebSocket.ConnectAsync(new Uri(WebSocketUrl), _cancellationTokenSource.Token);
-            Logger.LogInformation($"{SourceName}: WebSocket connected");
+            Logger.LogInformation("{Source}: WebSocket connected", SourceName);
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, $"{SourceName}: Failed to connect");
+            Logger.LogError(ex, "{Source}: Failed to connect", SourceName);
             throw;
         }
     }
 
     public virtual async Task DisconnectAsync()
     {
-        if (WebSocket is not null && WebSocket.State == WebSocketState.Open)
+        System.Net.WebSockets.ClientWebSocket? localWebSocket;
+        lock (_webSocketLock)
+        {
+            localWebSocket = WebSocket;
+            WebSocket = null;  // Обнуляем под lock
+        }
+
+        if (localWebSocket is not null)
         {
             try
             {
-                await WebSocket.CloseAsync(
-                    WebSocketCloseStatus.NormalClosure,
-                    "Closing connection",
-                    CancellationToken.None);
+                if (localWebSocket.State == WebSocketState.Open)
+                {
+                    await localWebSocket.CloseAsync(
+                        WebSocketCloseStatus.NormalClosure,
+                        "Closing connection",
+                        CancellationToken.None);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "{Source}: Error during CloseAsync", SourceName);
             }
             finally
             {
-                WebSocket.Dispose();
-                WebSocket = null;
+                localWebSocket.Dispose();
             }
         }
 
@@ -68,60 +105,106 @@ public abstract class BaseExchangeWebSocketClient : IExchangeClient
     public virtual async IAsyncEnumerable<NormalizedTick> GetTicksStreamAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-
-        if (WebSocket is null || WebSocket.State != WebSocketState.Open)
+        System.Net.WebSockets.ClientWebSocket? localWebSocket;
+        lock (_webSocketLock)
         {
-            throw new InvalidOperationException($"{SourceName}: WebSocket is not connected");
+            if (WebSocket is null || WebSocket.State != WebSocketState.Open)
+            {
+                throw new InvalidOperationException($"{SourceName}: WebSocket is not connected");
+            }
+            localWebSocket = WebSocket;  // Захватываем локальную копию под lock
         }
 
-        var buffer = new byte[65536];
+        var buffer = _bufferPool.Rent(65536);
+        var watch = new Stopwatch();
+        const int maxStreamCapacityBeforeDispose = 1024 * 1024;  // 1MB - если больше, то dispose
 
-        var totalCount = 0;
-        while (WebSocket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
+        try
         {
-            totalCount++;
-            long readMs = 0;
-            WebSocketReceiveResult result;
-            var watch = new Stopwatch();
-            watch.Start();
-            try
+            while (localWebSocket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
             {
-                result = await WebSocket.ReceiveAsync(
-                    new ArraySegment<byte>(buffer),
-                    cancellationToken).ConfigureAwait(false);
-                readMs = watch.ElapsedMilliseconds;
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError(ex, $"{SourceName}: Error receiving message");
-                throw;
-            }
+                var messageStream = _streamPool.Get();
+                WebSocketReceiveResult result;
 
-            if (result.MessageType == WebSocketMessageType.Close)
-            {
-                break;
-            }
-
-            NormalizedTick? normalizedTick = null;
-            try
-            {
-                normalizedTick = NormalizeMessageAsync(buffer.AsSpan(0,result.Count));
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError(ex, $"{SourceName}: Error normalizing message");
-                throw;
-            }
-
-            watch.Stop();
-            if (normalizedTick is not null)
-            {
-                if (watch.ElapsedMilliseconds > 3)
+                watch.Restart();
+                NormalizedTick? normalizedTick = null;
+                try
                 {
-                    Logger.LogWarning($"{readMs} ms read; {watch.ElapsedMilliseconds}ms to process message from {SourceName}");
+                    do
+                    {
+                        result = await localWebSocket.ReceiveAsync(
+                            new ArraySegment<byte>(buffer),
+                            cancellationToken).ConfigureAwait(false);
+
+                        if (result.MessageType == WebSocketMessageType.Close)
+                        {
+                            Logger.LogWarning("{Source}: WebSocket received close frame", SourceName);
+                            yield break;
+                        }
+
+                        messageStream.Write(buffer, 0, result.Count);
+
+                    } while (!result.EndOfMessage);  // ✅ Проверяем, что сообщение полное
+
+                    // ✅ Обработка собранного сообщения
+                    try
+                    {
+                        if (messageStream.TryGetBuffer(out var segment))
+                        {
+                            normalizedTick = NormalizeMessageAsync(segment.AsSpan());
+                        }
+                        else
+                        {
+                            normalizedTick = NormalizeMessageAsync(messageStream.ToArray());
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError(ex, "{Source}: Error normalizing message. Stream size: {Size}",
+                            SourceName, messageStream.Length);
+                        continue;
+                    }
+
+                    watch.Stop();
+
+                    if (normalizedTick is not null)
+                    {
+                        if (watch.ElapsedMilliseconds > 10)
+                        {
+                            Logger.LogWarning(
+                                "{Source}: Slow processing {TotalTime}ms. Size: {Size} bytes",
+                                SourceName, watch.ElapsedMilliseconds, messageStream.Length);
+                        }
+                    }
                 }
-                yield return normalizedTick;
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    Logger.LogError(ex, "{Source}: Error receiving fragments", SourceName);
+                    throw;
+                }
+
+                if (normalizedTick is not null)
+                {
+                    yield return normalizedTick;
+                }
+
+                // ✅ Возвращаем MemoryStream в pool или dispose если слишком большой
+                if (messageStream.Capacity > maxStreamCapacityBeforeDispose)
+                {
+                    messageStream.Dispose();
+                    _logger.LogWarning("{Source}: MemoryStream capacity {Capacity}MB exceeded limit, disposed",
+                        SourceName, messageStream.Capacity / (1024 * 1024));
+                }
+                else
+                {
+                    messageStream.SetLength(0);
+                    _streamPool.Return(messageStream);
+                }
             }
+        }
+        finally
+        {
+            _bufferPool.Return(buffer);
         }
     }
 
@@ -131,21 +214,10 @@ public abstract class BaseExchangeWebSocketClient : IExchangeClient
         await ConnectAsync(cancellationToken);
     }
 
-    /// <summary>
-    /// Абстрактный метод для нормализации сообщения конкретной биржи
-    /// </summary>
-    protected abstract NormalizedTick NormalizeMessageAsync(ReadOnlySpan<byte>  bytes);
+    protected abstract NormalizedTick? NormalizeMessageAsync(ReadOnlySpan<byte> bytes);
 
     protected static string GenerateDuplicateHash(string ticker, decimal price, long timestamp, string source)
     {
         return $"{ticker}_{price}_{timestamp}_{source}";
     }
 }
-
-
-
-
-
-
-
-

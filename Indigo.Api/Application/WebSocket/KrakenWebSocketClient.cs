@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using Indigo.Domain.Exceptions;
 using Indigo.Domain.ValueObjects;
+using Microsoft.Extensions.ObjectPool;
 
 namespace Indigo.Application.WebSocket;
 
@@ -18,8 +19,8 @@ public class KrakenWebSocketClient : BaseExchangeWebSocketClient
 
     public override string SourceName => "Kraken";
 
-    public KrakenWebSocketClient(ILogger<KrakenWebSocketClient> logger)
-        : base(logger, "wss://ws.kraken.com")
+    public KrakenWebSocketClient(ILogger<KrakenWebSocketClient> logger, ObjectPool<MemoryStream> streamPool)
+        : base(logger, "wss://ws.kraken.com", streamPool)
     {
     }
 
@@ -63,7 +64,7 @@ public class KrakenWebSocketClient : BaseExchangeWebSocketClient
         Logger.LogInformation($"{SourceName}: Sent subscription for pairs: {string.Join(", ", _pairs)}");
     }
 
-    protected override NormalizedTick NormalizeMessageAsync(ReadOnlySpan<byte>  bytes)
+    protected override NormalizedTick? NormalizeMessageAsync(ReadOnlySpan<byte>  bytes)
     {
         var reader = new Utf8JsonReader(bytes);
 

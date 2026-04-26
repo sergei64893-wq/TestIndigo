@@ -78,29 +78,37 @@ public class MockWebSocketClient : IExchangeClient
         };
 
         var tickCount = 0;
+        
+        // ✅ Для достижения 1000+ тиков/сек нужно генерировать больше тиков за раз
+        // 4 клиента × 250 тиков/сек = 1000 тиков/сек в сумме
+        // Каждый клиент должен генерировать 250-300 тиков/сек
+        // При задержке 10-50ms = нужно 2.5-15 тиков в батче, генерируем 50-100
+        
         while (!cancellationToken.IsCancellationRequested && IsConnected)
         {
             tickCount++;
             
-            // Генерируем 2-5 тиков за один цикл для имитации реального потока
-            var ticksInBatch = _random.Next(2, 6);
+            // ✅ Генерируем больше тиков за один цикл (50-150 вместо 2-6)
+            // Это даёт нам 1000-3000 тиков/сек при 4 клиентах
+            var ticksInBatch = _random.Next(50, 150);
+            
             for (int i = 0; i < ticksInBatch; i++)
             {
                 var ticker = tickers[_random.Next(tickers.Length)];
                 var basePrice = basePrices[ticker];
                 
-                // Имитируем движение цены (±5%)
+                // ✅ Имитируем движение цены (±5%)
                 var priceVariation = (decimal)(_random.NextDouble() - 0.5) * 2 * (basePrice * 0.05m);
                 var price = basePrice + priceVariation;
                 
                 var volume = (decimal)(_random.Next(10, 1000) + _random.NextDouble());
                 var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 
-                var duplicateHash = $"{ticker}_{price}_{timestamp}_{SourceName}";
+                var duplicateHash = $"{ticker}_{price:F8}_{timestamp}_{SourceName}";
                 
                 yield return new NormalizedTick(
                     Ticker: ticker,
-                    Price: Math.Max(0.01m, price), // Цена не может быть отрицательной
+                    Price: Math.Max(0.01m, price),  // ✅ Цена не может быть отрицательной
                     Volume: volume,
                     Timestamp: timestamp,
                     Source: SourceName,
@@ -109,8 +117,9 @@ public class MockWebSocketClient : IExchangeClient
                 );
             }
             
-            // Имитируем задержку между пакетами (10-100ms для 50-100 тиков/сек суммарно)
-            await Task.Delay(_random.Next(10, 100), cancellationToken);
+            // ✅ Уменьшаем задержку чтобы достичь 250+ тиков/сек на этом клиенте
+            // 50-100 тиков за 10-50ms = 1000-5000 тиков/сек на одном клиенте
+            await Task.Delay(_random.Next(10, 50), cancellationToken);
         }
     }
 

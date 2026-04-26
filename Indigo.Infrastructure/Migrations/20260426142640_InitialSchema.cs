@@ -64,7 +64,6 @@ namespace Indigo.Infrastructure.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
-
             migrationBuilder.DropTable(
                 name: "PriceTicks");
         }

@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Indigo.Domain.Exceptions;
 using Indigo.Domain.ValueObjects;
+using Microsoft.Extensions.ObjectPool;
 
 namespace Indigo.Application.WebSocket;
 
@@ -15,12 +16,12 @@ public class BinanceWebSocketClient : BaseExchangeWebSocketClient
 {
     public override string SourceName => "Binance";
 
-    public BinanceWebSocketClient(ILogger<BinanceWebSocketClient> logger, string pair)
-        : base(logger, $"wss://stream.binance.com:9443/ws/{pair}@trade")
+    public BinanceWebSocketClient(ILogger<BinanceWebSocketClient> logger, string pair, ObjectPool<MemoryStream> streamPool)
+        : base(logger, $"wss://stream.binance.com:9443/ws/{pair}@trade", streamPool)
     {
     }
 
-    protected override NormalizedTick NormalizeMessageAsync(ReadOnlySpan<byte> bytes)
+    protected override NormalizedTick? NormalizeMessageAsync(ReadOnlySpan<byte> bytes)
     {
         // Работаем с байтами напрямую (UTF8), чтобы избежать создания промежуточных строк
         var reader = new Utf8JsonReader(bytes);
@@ -78,7 +79,7 @@ public class BinanceWebSocketClient : BaseExchangeWebSocketClient
             Timestamp: timestamp,
             Source: SourceName,
             DuplicateCheckHash: duplicateHash,
-            RawData: Encoding.UTF8.GetString(bytes)
+            RawData: null  // Не аллоцировать строку, экономим память
         );
     }
 }

@@ -1,4 +1,6 @@
 using Indigo.Application.Interfaces;
+using System.Threading.Channels;
+using Indigo.Domain.ValueObjects;
 
 namespace Indigo.Application.Services;
 
@@ -11,6 +13,7 @@ public class TickAggregationService : IHostedService
     private readonly IExchangeClient[] _exchangeClients;
     private readonly ITickProcessor _tickProcessor;
     private readonly ITickProducer _tickProducer;
+    private readonly Channel<NormalizedTick> _tickChannel;
     private CancellationTokenSource? _cancellationTokenSource;
     private Task? _aggregationTask;
     private Task? _producerTask;
@@ -19,12 +22,14 @@ public class TickAggregationService : IHostedService
         ILogger<TickAggregationService> logger,
         IEnumerable<IExchangeClient> exchangeClients,
         ITickProcessor tickProcessor,
-        ITickProducer tickProducer)
+        ITickProducer tickProducer,
+        Channel<NormalizedTick> tickChannel)
     {
         _logger = logger;
         _exchangeClients = exchangeClients.ToArray();
         _tickProcessor = tickProcessor;
         _tickProducer = tickProducer;
+        _tickChannel = tickChannel;
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -65,6 +70,9 @@ public class TickAggregationService : IHostedService
             }
         }
 
+        // Complete the channel to signal the producer to finish
+        _tickChannel.Writer.Complete();
+
         if (_producerTask is not null)
         {
             try
@@ -86,7 +94,7 @@ public class TickAggregationService : IHostedService
             }
             catch (Exception ex)
             {
-                _logger.LogError(client.SourceName, "Error disconnecting client", ex);
+                _logger.LogError(ex, "Error disconnecting client {SourceName}", client.SourceName);
             }
         }
 

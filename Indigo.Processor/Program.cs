@@ -1,16 +1,21 @@
 using Confluent.Kafka;
 using Indigo.Domain.ValueObjects;
+using Indigo.Domain.Entities;
 using Indigo.Infrastructure.Database;
 using Indigo.Infrastructure.Interfaces;
 using Indigo.Infrastructure.Repositories;
 using MassTransit;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.ObjectPool;
 
 var builder = Host.CreateApplicationBuilder(args);
 
 builder.Services.AddScoped<ITickRepository, TickRepository>();
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
+
+builder.Services.AddSingleton<ObjectPool<List<PriceTick>>>(sp =>
+    ObjectPool.Create(new DefaultPooledObjectPolicy<List<PriceTick>>()));
 
 builder.Services.AddMassTransit(x =>
 {

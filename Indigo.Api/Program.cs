@@ -2,6 +2,7 @@ using Indigo.Application.Interfaces;
 using Indigo.Application.Services;
 using Indigo.Application.WebSocket;
 using Indigo.Domain.ValueObjects;
+using Indigo.Domain.Entities;
 using Indigo.Infrastructure.Database;
 using Indigo.Infrastructure.Interfaces;
 using Indigo.Infrastructure.Repositories;
@@ -12,6 +13,7 @@ using Serilog;
 using System.Threading.Channels;
 using Indigo.Middleware;
 using StackExchange.Redis;
+using Microsoft.Extensions.ObjectPool;
 
 WebApplication app = null!;
 
@@ -74,14 +76,18 @@ try
         Log.Information("Using REAL WebSocket clients for production");
     }
     
-    builder.Services.AddSingleton(Channel.CreateBounded<NormalizedTick>(new BoundedChannelOptions(10000)
+    // ✅ Увеличиваем буфер для 1000+ тиков/сек
+    // 200000 элементов = 200ms буферизации при 1000 тиков/сек
+    // MultipleWriter = true (разные клиенты пишут одновременно)
+    // SingleReader = true (один TickProducer читает)
+    builder.Services.AddSingleton(Channel.CreateBounded<NormalizedTick>(new BoundedChannelOptions(200000)
     {
-        SingleWriter = false,
-        SingleReader = true
+        SingleWriter = false,  // ✅ Множественные писатели (несколько WebSocket клиентов)
+        SingleReader = true    // ✅ Один читатель (TickProducer)
     }));
     
-    builder.Services.AddTransient<ITickProcessor, TickProcessor>();
-    builder.Services.AddTransient<ITickProducer, TickProducer>();
+    builder.Services.AddSingleton<ITickProcessor, TickProcessor>();
+    builder.Services.AddSingleton<ITickProducer, TickProducer>();
 
     builder.Services.AddHostedService<TickAggregationService>();
     
@@ -91,10 +97,10 @@ try
     
     builder.Services.AddMassTransit(x =>
     {
-        // Конфигурируем базовую шину с in-memory транспортом
+        // Конфигурируем базовую шину с in-memory транспортом для внутренних сообщений
         x.UsingInMemory((context, cfg) => { cfg.ConfigureEndpoints(context); });
 
-        // Добавляем Kafka Rider
+        // Добавляем Kafka Rider для продюсера
         x.AddRider(rider =>
         {
             rider.AddProducer<string, NormalizedTick>(
@@ -113,8 +119,18 @@ try
         options.Configuration = builder.Configuration["Redis:ConnectionString"]);
     
     // Регистрируем IConnectionMultiplexer для прямого доступа к Redis
-    builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
+    builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
         ConnectionMultiplexer.Connect(builder.Configuration["Redis:ConnectionString"] ?? "localhost:6379"));
+    
+    // Добавляем ObjectPool для снижения аллокаций
+    builder.Services.AddSingleton<ObjectPool<List<NormalizedTick>>>(_ =>
+        ObjectPool.Create(new DefaultPooledObjectPolicy<List<NormalizedTick>>()));
+    builder.Services.AddSingleton<ObjectPool<List<PriceTick>>>(_ =>
+        ObjectPool.Create(new DefaultPooledObjectPolicy<List<PriceTick>>()));
+    builder.Services.AddSingleton<ObjectPool<List<string>>>(_ =>
+        ObjectPool.Create(new DefaultPooledObjectPolicy<List<string>>()));
+    builder.Services.AddSingleton<ObjectPool<MemoryStream>>(_ =>
+        ObjectPool.Create(new DefaultPooledObjectPolicy<MemoryStream>()));
     
     app = builder.Build();
     

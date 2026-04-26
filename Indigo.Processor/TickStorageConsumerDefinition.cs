@@ -7,8 +7,8 @@ public class TickStorageConsumerDefinition : ConsumerDefinition<TickStorageConsu
     {
         // Принудительно включаем батчинг на уровне конфигуратора
         consumerConfigurator.Options<BatchOptions>(o => o
-            .SetMessageLimit(100)
-            .SetTimeLimit(TimeSpan.FromSeconds(5))
+            .SetMessageLimit(1000)
+            .SetTimeLimit(TimeSpan.FromSeconds(1))
             .SetConcurrencyLimit(1));
     }
 }

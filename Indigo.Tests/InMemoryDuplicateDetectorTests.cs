@@ -7,13 +7,11 @@ namespace Indigo.Tests;
 
 public class InMemoryDuplicateDetectorTests
 {
-    private readonly IMemoryCache _cache;
     private readonly InMemoryDuplicateDetector _detector;
 
     public InMemoryDuplicateDetectorTests()
     {
-        _cache = new MemoryCache(new MemoryCacheOptions());
-        _detector = new InMemoryDuplicateDetector(_cache);
+        _detector = new InMemoryDuplicateDetector();
     }
 
     [Fact]

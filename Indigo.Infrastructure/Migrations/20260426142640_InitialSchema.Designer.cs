@@ -12,7 +12,7 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace Indigo.Infrastructure.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20260410205138_InitialSchema")]
+    [Migration("20260426142640_InitialSchema")]
     partial class InitialSchema
     {
         /// <inheritdoc />
@@ -20,11 +20,10 @@ namespace Indigo.Infrastructure.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "9.0.0")
+                .HasAnnotation("ProductVersion", "9.0.14")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
-
 
             modelBuilder.Entity("Indigo.Domain.Entities.PriceTick", b =>
                 {
